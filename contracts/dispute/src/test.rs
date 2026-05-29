@@ -1527,3 +1527,195 @@ fn test_delegated_vote_counts_same_as_direct_vote_in_resolution() {
     let status = client.resolve_dispute(&dispute_id);
     assert_eq!(status, DisputeStatus::ResolvedForFreelancer);
 }
+
+// ── Appeal mechanism tests (#529) ─────────────────────────────────────────────
+
+fn setup_resolved_dispute(env: &Env) -> (DisputeContractClient, Address, Address, u64) {
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(env);
+    let job_client = Address::generate(env);
+    let freelancer = Address::generate(env);
+
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+    let dispute_id = client.raise_dispute(
+        &1u64, &job_client, &freelancer, &job_client,
+        &String::from_str(env, "Work not delivered"), &3u32, &None,
+    );
+
+    // Cast 3 votes so the dispute can be resolved.
+    for _ in 0..3u32 {
+        let v = Address::generate(env);
+        client.cast_vote(&dispute_id, &v, &VoteChoice::Client, &String::from_str(env, "v"));
+    }
+    let _ = client.resolve_dispute(&dispute_id);
+
+    (client, job_client, freelancer, dispute_id)
+}
+
+#[test]
+fn test_appeal_filed_within_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (client, job_client, _, dispute_id) = setup_resolved_dispute(&env);
+
+    // Still within the 48-hour window — appeal should succeed.
+    let appeal_id = client.appeal(&dispute_id, &job_client);
+    assert_eq!(appeal_id, 1);
+
+    let ap = client.get_appeal(&appeal_id);
+    assert_eq!(ap.dispute_id, dispute_id);
+    assert_eq!(ap.appellant, job_client);
+    assert_eq!(ap.status, AppealStatus::Open);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #18)")] // AppealWindowExpired
+fn test_appeal_rejected_after_48h_window() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (client, job_client, _, dispute_id) = setup_resolved_dispute(&env);
+
+    // Advance past the 48-hour window (172_800 s).
+    env.ledger().with_mut(|l| l.timestamp = 1000 + 172_801);
+
+    client.appeal(&dispute_id, &job_client);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")] // AlreadyAppealed
+fn test_second_appeal_on_same_dispute_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (client, job_client, freelancer, dispute_id) = setup_resolved_dispute(&env);
+
+    client.appeal(&dispute_id, &job_client);
+    // Second appeal on the same dispute must fail.
+    client.appeal(&dispute_id, &freelancer);
+}
+
+#[test]
+fn test_appeal_original_arbitrators_excluded_from_panel() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    let job_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+
+    let dispute_id = client.raise_dispute(
+        &1u64, &job_client, &freelancer, &job_client,
+        &String::from_str(&env, "Issue"), &3u32, &None,
+    );
+
+    // Use deterministic voter addresses so we can check them later.
+    let original_voter = Address::generate(&env);
+    for _ in 0..2u32 {
+        let v = Address::generate(&env);
+        client.cast_vote(&dispute_id, &v, &VoteChoice::Client, &String::from_str(&env, "v"));
+    }
+    client.cast_vote(&dispute_id, &original_voter, &VoteChoice::Client, &String::from_str(&env, "v"));
+    let _ = client.resolve_dispute(&dispute_id);
+
+    let appeal_id = client.appeal(&dispute_id, &job_client);
+
+    // The original voter is in excluded_arbitrators — they cannot cast an appeal vote.
+    let ap = client.get_appeal(&appeal_id);
+    assert!(ap.excluded_arbitrators.contains(&original_voter));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")] // ConflictOfInterest
+fn test_original_arbitrator_cannot_vote_on_appeal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let dispute_contract_id = env.register_contract(None, DisputeContract);
+    let client = DisputeContractClient::new(&env, &dispute_contract_id);
+    let escrow_contract_id = env.register_contract(None, DummyEscrow);
+    let reputation_contract_id = env.register_contract(None, MockReputationContract);
+    let admin = Address::generate(&env);
+    let job_client = Address::generate(&env);
+    let freelancer = Address::generate(&env);
+    client.initialize(&admin, &reputation_contract_id, &300, &escrow_contract_id);
+
+    let dispute_id = client.raise_dispute(
+        &1u64, &job_client, &freelancer, &job_client,
+        &String::from_str(&env, "Issue"), &3u32, &None,
+    );
+    let original_voter = Address::generate(&env);
+    for _ in 0..2u32 {
+        let v = Address::generate(&env);
+        client.cast_vote(&dispute_id, &v, &VoteChoice::Client, &String::from_str(&env, "v"));
+    }
+    client.cast_vote(&dispute_id, &original_voter, &VoteChoice::Client, &String::from_str(&env, "v"));
+    let _ = client.resolve_dispute(&dispute_id);
+
+    let appeal_id = client.appeal(&dispute_id, &job_client);
+
+    // Original voter attempts to vote on the appeal — must fail.
+    client.cast_appeal_vote(
+        &appeal_id, &original_voter, &VoteChoice::Freelancer, &String::from_str(&env, "re-vote"),
+    );
+}
+
+#[test]
+fn test_appeal_resolution_overwrites_original_dispute() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (client, job_client, _, dispute_id) = setup_resolved_dispute(&env);
+
+    // Original dispute resolved for client.
+    let dispute_before = client.get_dispute(&dispute_id);
+    assert_eq!(dispute_before.status, DisputeStatus::ResolvedForClient);
+
+    let appeal_id = client.appeal(&dispute_id, &job_client);
+
+    // Five new arbitrators vote for freelancer on the appeal.
+    for _ in 0..5u32 {
+        let v = Address::generate(&env);
+        client.cast_appeal_vote(&appeal_id, &v, &VoteChoice::Freelancer, &String::from_str(&env, "appeal"));
+    }
+
+    let appeal_status = client.resolve_appeal(&appeal_id);
+    assert_eq!(appeal_status, AppealStatus::ResolvedForFreelancer);
+
+    // The original dispute status must now reflect the appeal's binding decision.
+    let dispute_after = client.get_dispute(&dispute_id);
+    assert_eq!(dispute_after.status, DisputeStatus::ResolvedForFreelancer);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")] // NotEnoughVotes
+fn test_appeal_requires_five_votes() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (client, job_client, _, dispute_id) = setup_resolved_dispute(&env);
+    let appeal_id = client.appeal(&dispute_id, &job_client);
+
+    // Only 4 votes cast — must fail to resolve.
+    for _ in 0..4u32 {
+        let v = Address::generate(&env);
+        client.cast_appeal_vote(&appeal_id, &v, &VoteChoice::Freelancer, &String::from_str(&env, "v"));
+    }
+    client.resolve_appeal(&appeal_id);
+}
