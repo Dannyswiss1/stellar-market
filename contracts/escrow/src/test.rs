@@ -2934,3 +2934,500 @@ fn test_top_up_escrow_emits_event() {
     assert_eq!(topic1, symbol_short!("top_up"));
 }
 
+
+// ============================================================
+// STATE MACHINE VALIDATION TESTS
+// ============================================================
+// These tests verify that the escrow state machine enforces
+// valid transitions and rejects invalid ones with proper errors.
+// ============================================================
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_fund_job_fails_when_already_funded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    
+    // Fund the job once (valid transition: Created -> Funded)
+    contract.fund_job(&job_id, &client);
+    
+    // Try to fund again (invalid: Funded -> Funded)
+    contract.fund_job(&job_id, &client);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_fund_job_fails_when_in_progress() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    
+    // Submit milestone to transition to InProgress
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    
+    // Try to fund again (invalid: InProgress -> Funded)
+    contract.fund_job(&job_id, &client);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_fund_job_fails_when_completed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    contract.approve_milestone(&job_id, &0, &client);
+    
+    // Job is now Completed (terminal state)
+    // Try to fund again (invalid: Completed -> Funded)
+    contract.fund_job(&job_id, &client);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_submit_milestone_fails_when_created() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    
+    // Try to submit milestone before funding (invalid: Created -> InProgress)
+    contract.submit_milestone(&job_id, &0, &freelancer);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_submit_milestone_fails_when_completed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![
+        &env,
+        (String::from_str(&env, "Work 1"), 500_i128, JOB_DEADLINE),
+        (String::from_str(&env, "Work 2"), 500_i128, JOB_DEADLINE),
+    ];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    contract.approve_milestone(&job_id, &0, &client);
+    
+    // Job is now InProgress (first milestone approved, second pending)
+    contract.submit_milestone(&job_id, &1, &freelancer);
+    contract.approve_milestone(&job_id, &1, &client);
+    
+    // Job is now Completed (all milestones approved)
+    // Try to submit another milestone (invalid: Completed state is terminal)
+    contract.submit_milestone(&job_id, &0, &freelancer);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_approve_milestone_fails_when_created() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    
+    // Try to approve milestone before funding (invalid state)
+    contract.approve_milestone(&job_id, &0, &client);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_cancel_job_fails_when_created() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    
+    // Try to cancel before funding (invalid: Created state cannot be cancelled)
+    contract.cancel_job(&job_id, &client);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_cancel_job_fails_when_completed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    contract.approve_milestone(&job_id, &0, &client);
+    
+    // Job is now Completed (terminal state)
+    // Try to cancel (invalid: Completed is terminal)
+    contract.cancel_job(&job_id, &client);
+}
+
+#[test]
+fn test_cancel_job_succeeds_when_funded_no_work_started() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    
+    // Valid transition: Funded -> Cancelled (no work started)
+    contract.cancel_job(&job_id, &client);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Cancelled);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #25)")] // WorkInProgress
+fn test_cancel_job_fails_when_work_in_progress() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    
+    // Milestone is submitted (work in progress)
+    // Try to cancel (invalid: must dispute instead)
+    contract.cancel_job(&job_id, &client);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_top_up_escrow_fails_when_created() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    
+    // Try to top up before funding (invalid: Created state)
+    contract.top_up_escrow(&client, &job_id, &100_i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_top_up_escrow_fails_when_completed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    contract.approve_milestone(&job_id, &0, &client);
+    
+    // Job is now Completed
+    // Try to top up (invalid: Completed is terminal)
+    contract.top_up_escrow(&client, &job_id, &100_i128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_expire_job_fails_when_completed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    contract.approve_milestone(&job_id, &0, &client);
+    
+    // Job is now Completed (terminal state)
+    // Advance time past deadline
+    env.ledger().with_mut(|l| l.timestamp = JOB_DEADLINE + 1);
+    
+    // Try to expire (invalid: Completed is terminal)
+    contract.expire_job(&job_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_expire_job_fails_when_cancelled() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.cancel_job(&job_id, &client);
+    
+    // Job is now Cancelled (terminal state)
+    // Advance time past deadline
+    env.ledger().with_mut(|l| l.timestamp = JOB_DEADLINE + 1);
+    
+    // Try to expire (invalid: Cancelled is terminal)
+    contract.expire_job(&job_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_expire_job_fails_when_already_expired() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    
+    // Advance time past deadline
+    env.ledger().with_mut(|l| l.timestamp = JOB_DEADLINE + 1);
+    
+    // Expire the job (valid transition: Funded -> Expired)
+    contract.expire_job(&job_id);
+    
+    // Try to expire again (invalid: Expired is terminal)
+    contract.expire_job(&job_id);
+}
+
+#[test]
+fn test_expire_job_succeeds_when_funded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    
+    // Advance time past deadline
+    env.ledger().with_mut(|l| l.timestamp = JOB_DEADLINE + 1);
+    
+    // Valid transition: Funded -> Expired
+    contract.expire_job(&job_id);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Expired);
+}
+
+#[test]
+fn test_expire_job_succeeds_when_in_progress() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![
+        &env,
+        (String::from_str(&env, "Work 1"), 500_i128, JOB_DEADLINE),
+        (String::from_str(&env, "Work 2"), 500_i128, JOB_DEADLINE),
+    ];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    
+    // Job is now InProgress
+    // Advance time past deadline
+    env.ledger().with_mut(|l| l.timestamp = JOB_DEADLINE + 1);
+    
+    // Valid transition: InProgress -> Expired
+    contract.expire_job(&job_id);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Expired);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_resolve_dispute_fails_when_created() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    
+    // Try to resolve dispute on Created job (invalid: not disputable)
+    contract.resolve_dispute_callback(&job_id, &DisputeResolution::ClientWins);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_resolve_dispute_fails_when_completed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    contract.approve_milestone(&job_id, &0, &client);
+    
+    // Job is now Completed (terminal state)
+    // Try to resolve dispute (invalid: Completed is terminal)
+    contract.resolve_dispute_callback(&job_id, &DisputeResolution::ClientWins);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")] // InvalidStatus
+fn test_resolve_dispute_fails_when_cancelled() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.cancel_job(&job_id, &client);
+    
+    // Job is now Cancelled (terminal state)
+    // Try to resolve dispute (invalid: Cancelled is terminal)
+    contract.resolve_dispute_callback(&job_id, &DisputeResolution::ClientWins);
+}
+
+#[test]
+fn test_state_transition_created_to_funded() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Created);
+    
+    // Valid transition: Created -> Funded
+    contract.fund_job(&job_id, &client);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Funded);
+}
+
+#[test]
+fn test_state_transition_funded_to_in_progress() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Funded);
+    
+    // Valid transition: Funded -> InProgress
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::InProgress);
+}
+
+#[test]
+fn test_state_transition_in_progress_to_completed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::InProgress);
+    
+    // Valid transition: InProgress -> Completed (when all milestones approved)
+    contract.approve_milestone(&job_id, &0, &client);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Completed);
+}
+
+#[test]
+fn test_terminal_states_cannot_transition() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().with_mut(|l| l.timestamp = 1000);
+
+    let (contract, client, freelancer, token, _admin) = setup_test(&env);
+
+    // Test Completed is terminal
+    let milestones = vec![&env, (String::from_str(&env, "Work"), 1000_i128, JOB_DEADLINE)];
+    let job_id = contract.create_job(&client, &freelancer, &token, &milestones, &JOB_DEADLINE, &GRACE_PERIOD);
+    contract.fund_job(&job_id, &client);
+    contract.submit_milestone(&job_id, &0, &freelancer);
+    contract.approve_milestone(&job_id, &0, &client);
+    
+    let job = contract.get_job(&job_id);
+    assert_eq!(job.status, JobStatus::Completed);
+    
+    // Verify no operations can change state from Completed
+    // (already tested in individual test cases above)
+}
