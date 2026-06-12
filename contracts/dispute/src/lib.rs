@@ -82,6 +82,34 @@ pub enum DisputeResolution {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AppealStatus {
+    Open,
+    Voting,
+    ResolvedForClient,
+    ResolvedForFreelancer,
+    RefundedBoth,
+    RefundSplit(u32),
+    Escalated,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Appeal {
+    pub id: u64,
+    pub dispute_id: u64,
+    pub appellant: Address,
+    pub excluded_arbitrators: Vec<Address>,
+    pub status: AppealStatus,
+    pub votes_for_client: u32,
+    pub votes_for_freelancer: u32,
+    pub votes_for_refund_split: u32,
+    pub refund_split_sum: u64,
+    pub created_at: u64,
+    pub voting_deadline: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VoteChoice {
     Client,
     Freelancer,
@@ -998,6 +1026,349 @@ impl DisputeContract {
         }
 
         internal_resolve(&env, dispute_id, &mut dispute, &escrow_addr, true)
+    }
+
+    /// File an appeal on a resolved dispute within the 48-hour appeal window.
+    /// Only the client or freelancer may appeal. Each dispute can be appealed at most once.
+    /// The original arbitrators are excluded from the appeal panel.
+    pub fn appeal(
+        env: Env,
+        dispute_id: u64,
+        appellant: Address,
+    ) -> Result<u64, DisputeError> {
+        appellant.require_auth();
+        require_not_paused(&env)?;
+
+        let dispute: Dispute = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Dispute(dispute_id))
+            .ok_or(DisputeError::DisputeNotFound)?;
+        bump_dispute_ttl(&env, dispute_id);
+
+        if appellant != dispute.client && appellant != dispute.freelancer {
+            return Err(DisputeError::InvalidParty);
+        }
+
+        // Dispute must be resolved before it can be appealed.
+        let is_resolved = matches!(
+            dispute.status,
+            DisputeStatus::ResolvedForClient
+                | DisputeStatus::ResolvedForFreelancer
+                | DisputeStatus::RefundedBoth
+                | DisputeStatus::Escalated
+        ) || matches!(dispute.status, DisputeStatus::RefundSplit(_));
+        if !is_resolved {
+            return Err(DisputeError::VotingClosed);
+        }
+
+        // Enforce 48-hour appeal window from when the dispute was closed.
+        let resolved_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LastDisputeClosedAt(dispute.job_id))
+            .unwrap_or(0);
+        if env.ledger().timestamp() > resolved_at.saturating_add(APPEAL_WINDOW_SECS) {
+            return Err(DisputeError::AppealWindowExpired);
+        }
+
+        // Each dispute may only be appealed once.
+        if env.storage().persistent().has(&DataKey::DisputeAppeal(dispute_id)) {
+            return Err(DisputeError::AlreadyAppealed);
+        }
+
+        // Snapshot the original arbitrators to exclude them from the appeal panel.
+        let excluded = Self::get_arbitrators(env.clone(), dispute_id);
+
+        let mut appeal_count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AppealCount)
+            .unwrap_or(0);
+        appeal_count += 1;
+
+        let now = env.ledger().timestamp();
+        let new_appeal = Appeal {
+            id: appeal_count,
+            dispute_id,
+            appellant: appellant.clone(),
+            excluded_arbitrators: excluded,
+            status: AppealStatus::Open,
+            votes_for_client: 0,
+            votes_for_freelancer: 0,
+            votes_for_refund_split: 0,
+            refund_split_sum: 0,
+            created_at: now,
+            voting_deadline: now.saturating_add(VOTING_PERIOD_SECS),
+        };
+
+        env.storage().persistent().set(&DataKey::Appeal(appeal_count), &new_appeal);
+        env.storage().instance().set(&DataKey::AppealCount, &appeal_count);
+        env.storage().persistent().set(&DataKey::DisputeAppeal(dispute_id), &appeal_count);
+        env.storage().persistent().set(&DataKey::AppealVotes(appeal_count), &Vec::<Vote>::new(&env));
+        bump_appeal_ttl(&env, appeal_count);
+        bump_appeal_votes_ttl(&env, appeal_count);
+        bump_dispute_appeal_ttl(&env, dispute_id);
+        bump_dispute_count_ttl(&env);
+
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("appealed")),
+            (appeal_count, dispute_id, appellant),
+        );
+
+        Ok(appeal_count)
+    }
+
+    /// Cast a vote on an appeal. Original arbitrators from the base dispute are excluded.
+    pub fn cast_appeal_vote(
+        env: Env,
+        appeal_id: u64,
+        voter: Address,
+        choice: VoteChoice,
+        reason: String,
+    ) -> Result<(), DisputeError> {
+        voter.require_auth();
+        require_not_paused(&env)?;
+
+        let mut ap: Appeal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Appeal(appeal_id))
+            .ok_or(DisputeError::AppealNotFound)?;
+        bump_appeal_ttl(&env, appeal_id);
+
+        if ap.status != AppealStatus::Open && ap.status != AppealStatus::Voting {
+            return Err(DisputeError::VotingClosed);
+        }
+
+        // Load the original dispute to block parties from voting.
+        let dispute: Dispute = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Dispute(ap.dispute_id))
+            .ok_or(DisputeError::DisputeNotFound)?;
+
+        if voter == dispute.client || voter == dispute.freelancer {
+            return Err(DisputeError::InvalidParty);
+        }
+
+        // Block original arbitrators from the appeal panel.
+        if ap.excluded_arbitrators.contains(&voter) {
+            return Err(DisputeError::ConflictOfInterest);
+        }
+
+        let voted_key = DataKey::HasVotedAppeal(appeal_id, voter.clone());
+        if env.storage().persistent().has(&voted_key) {
+            return Err(DisputeError::AlreadyVoted);
+        }
+
+        let vote = Vote {
+            voter: voter.clone(),
+            choice: choice.clone(),
+            reason,
+            timestamp: env.ledger().timestamp(),
+        };
+
+        let mut votes: Vec<Vote> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AppealVotes(appeal_id))
+            .unwrap_or(Vec::new(&env));
+        votes.push_back(vote);
+        env.storage().persistent().set(&DataKey::AppealVotes(appeal_id), &votes);
+        bump_appeal_votes_ttl(&env, appeal_id);
+
+        match choice {
+            VoteChoice::Client => ap.votes_for_client += 1,
+            VoteChoice::Freelancer => ap.votes_for_freelancer += 1,
+            VoteChoice::RefundSplit(pct) => {
+                if pct > 100 {
+                    return Err(DisputeError::Unauthorized);
+                }
+                ap.votes_for_refund_split += 1;
+                ap.refund_split_sum = ap.refund_split_sum.saturating_add(pct as u64);
+            }
+        }
+
+        ap.status = AppealStatus::Voting;
+        env.storage().persistent().set(&DataKey::Appeal(appeal_id), &ap);
+        env.storage().persistent().set(&voted_key, &true);
+        bump_appeal_ttl(&env, appeal_id);
+        bump_has_voted_appeal_ttl(&env, appeal_id, &voter);
+
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("ap_voted")),
+            (appeal_id, voter, ap.dispute_id),
+        );
+
+        Ok(())
+    }
+
+    /// Resolve an appeal once enough votes have been cast.
+    /// The decision is binding — it overwrites the original dispute's resolution.
+    /// The losing party's reputation is slashed at double the normal rate.
+    pub fn resolve_appeal(env: Env, appeal_id: u64) -> Result<AppealStatus, DisputeError> {
+        require_not_paused(&env)?;
+
+        let mut ap: Appeal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Appeal(appeal_id))
+            .ok_or(DisputeError::AppealNotFound)?;
+        bump_appeal_ttl(&env, appeal_id);
+
+        let already_resolved = matches!(
+            ap.status,
+            AppealStatus::ResolvedForClient
+                | AppealStatus::ResolvedForFreelancer
+                | AppealStatus::RefundedBoth
+                | AppealStatus::Escalated
+        ) || matches!(ap.status, AppealStatus::RefundSplit(_));
+        if already_resolved {
+            return Err(DisputeError::AlreadyResolved);
+        }
+
+        let total_votes =
+            ap.votes_for_client + ap.votes_for_freelancer + ap.votes_for_refund_split;
+        if total_votes < APPEAL_MIN_VOTES {
+            return Err(DisputeError::NotEnoughVotes);
+        }
+
+        // Determine the appeal outcome by plurality.
+        if ap.votes_for_client > ap.votes_for_freelancer
+            && ap.votes_for_client > ap.votes_for_refund_split
+        {
+            ap.status = AppealStatus::ResolvedForClient;
+        } else if ap.votes_for_freelancer > ap.votes_for_client
+            && ap.votes_for_freelancer > ap.votes_for_refund_split
+        {
+            ap.status = AppealStatus::ResolvedForFreelancer;
+        } else if ap.votes_for_refund_split > ap.votes_for_client
+            && ap.votes_for_refund_split > ap.votes_for_freelancer
+        {
+            let avg = ap.refund_split_sum / ap.votes_for_refund_split as u64;
+            ap.status = AppealStatus::RefundSplit(avg as u32);
+        } else {
+            ap.status = AppealStatus::RefundedBoth;
+        }
+
+        let resolution = match ap.status {
+            AppealStatus::ResolvedForClient => DisputeResolution::ClientWins,
+            AppealStatus::ResolvedForFreelancer => DisputeResolution::FreelancerWins,
+            AppealStatus::RefundedBoth => DisputeResolution::RefundBoth,
+            AppealStatus::RefundSplit(pct) => DisputeResolution::RefundSplit(pct),
+            _ => DisputeResolution::Escalate,
+        };
+
+        // Overwrite the original dispute's resolution — the appeal is final.
+        let mut dispute: Dispute = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Dispute(ap.dispute_id))
+            .ok_or(DisputeError::DisputeNotFound)?;
+
+        let dispute_outcome = match ap.status {
+            AppealStatus::ResolvedForClient => DisputeStatus::ResolvedForClient,
+            AppealStatus::ResolvedForFreelancer => DisputeStatus::ResolvedForFreelancer,
+            AppealStatus::RefundedBoth => DisputeStatus::RefundedBoth,
+            AppealStatus::RefundSplit(pct) => DisputeStatus::RefundSplit(pct),
+            _ => DisputeStatus::Escalated,
+        };
+        dispute.status = dispute_outcome;
+        env.storage().persistent().set(&DataKey::Dispute(ap.dispute_id), &dispute);
+        bump_dispute_ttl(&env, ap.dispute_id);
+
+        // Notify escrow of the (possibly revised) resolution.
+        if resolution != DisputeResolution::Escalate {
+            let escrow_addr: Address = env
+                .storage()
+                .instance()
+                .get(&DataKey::EscrowContract)
+                .ok_or(DisputeError::NotInitialized)?;
+
+            env.invoke_contract::<()>(
+                &escrow_addr,
+                &Symbol::new(&env, "resolve_dispute_callback"),
+                vec![&env, dispute.job_id.into_val(&env), resolution.clone().into_val(&env)],
+            );
+
+            // Double-rate reputation slash to deter frivolous appeals.
+            if let Some(reputation_contract) = env
+                .storage()
+                .instance()
+                .get::<DataKey, Address>(&DataKey::ReputationContract)
+            {
+                let loser = match resolution {
+                    DisputeResolution::ClientWins => dispute.freelancer.clone(),
+                    DisputeResolution::FreelancerWins => dispute.client.clone(),
+                    _ => ap.appellant.clone(),
+                };
+
+                let slash_bps: u32 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::ReputationSlashBps)
+                    .unwrap_or(DEFAULT_REPUTATION_SLASH_BPS);
+
+                let current_score = env
+                    .try_invoke_contract::<reputation::UserReputation, soroban_sdk::Error>(
+                        &reputation_contract,
+                        &Symbol::new(&env, "get_reputation"),
+                        vec![&env, loser.clone().into_val(&env)],
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .map(|r| r.total_score)
+                    .unwrap_or(0);
+
+                // Double the slash rate for appeals.
+                let double_bps = slash_bps.saturating_mul(2);
+                let mut slash_amount: u64 =
+                    (current_score.saturating_mul(double_bps as u64)) / 10_000;
+                if slash_amount == 0 && current_score > 0 {
+                    slash_amount = 1;
+                }
+
+                let reason = String::from_str(&env, "appeal_lost");
+                let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                    &reputation_contract,
+                    &Symbol::new(&env, "slash_reputation"),
+                    vec![
+                        &env,
+                        loser.clone().into_val(&env),
+                        dispute.job_id.into_val(&env),
+                        slash_amount.into_val(&env),
+                        reason.into_val(&env),
+                    ],
+                );
+
+                env.events().publish(
+                    (symbol_short!("dispute"), Symbol::new(&env, "ap_slashed")),
+                    (ap.id, loser, slash_amount),
+                );
+            }
+        }
+
+        env.storage().persistent().set(&DataKey::Appeal(appeal_id), &ap);
+        bump_appeal_ttl(&env, appeal_id);
+
+        env.events().publish(
+            (symbol_short!("dispute"), symbol_short!("ap_done")),
+            (appeal_id, ap.status.clone(), ap.dispute_id),
+        );
+
+        Ok(ap.status.clone())
+    }
+
+    /// Get appeal details.
+    pub fn get_appeal(env: Env, appeal_id: u64) -> Result<Appeal, DisputeError> {
+        let ap: Appeal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Appeal(appeal_id))
+            .ok_or(DisputeError::AppealNotFound)?;
+        bump_appeal_ttl(&env, appeal_id);
+        Ok(ap)
     }
 
     /// Get dispute details.
