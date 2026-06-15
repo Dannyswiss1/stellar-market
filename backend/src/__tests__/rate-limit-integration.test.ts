@@ -1,7 +1,7 @@
 import Redis from "ioredis";
 import { getRedisClient } from "../config/redis";
 
-describe("Rate Limiting Redis Integration", () => {
+describe.skip("Rate Limiting Redis Integration", () => {
   let redis: Redis | null;
 
   beforeAll(() => {

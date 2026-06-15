@@ -317,9 +317,13 @@ router.post(
         ? job.client.walletAddress
         : job.freelancer!.walletAddress;
 
+    if (!callerWallet) {
+      return res.status(400).json({ error: "Caller has no wallet address." });
+    }
+
     const xdr = await ContractService.buildAcceptRevisionTx(
       callerWallet,
-      job.contractJobId
+      job.contractJobId ?? ""
     );
     res.json({ xdr });
   })
@@ -352,9 +356,13 @@ router.post(
         ? job.client.walletAddress
         : job.freelancer!.walletAddress;
 
+    if (!callerWallet) {
+      return res.status(400).json({ error: "Caller has no wallet address." });
+    }
+
     const xdr = await ContractService.buildRejectRevisionTx(
       callerWallet,
-      job.contractJobId
+      job.contractJobId ?? ""
     );
     res.json({ xdr });
   })

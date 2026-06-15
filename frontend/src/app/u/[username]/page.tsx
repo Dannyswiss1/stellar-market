@@ -20,11 +20,12 @@ async function getPublicProfile(username: string) {
 export async function generateMetadata({
   params,
 }: {
-  params: { username: string };
+  params: Promise<{ username: string }>;
 }): Promise<Metadata> {
-  const profile = await getPublicProfile(params.username);
+  const { username } = await params;
+  const profile = await getPublicProfile(username);
   const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "https://stellarmarket.io";
-  const canonical = `${baseUrl}/profile/${params.username}`;
+  const canonical = `${baseUrl}/u/${username}`;
 
   if (!profile) {
     return {
@@ -63,9 +64,10 @@ export async function generateMetadata({
 export default async function PublicProfilePage({
   params,
 }: {
-  params: { username: string };
+  params: Promise<{ username: string }>;
 }) {
-  const profile = await getPublicProfile(params.username);
+  const { username } = await params;
+  const profile = await getPublicProfile(username);
   if (!profile) notFound();
   return <PublicProfileClient profile={profile} />;
 }

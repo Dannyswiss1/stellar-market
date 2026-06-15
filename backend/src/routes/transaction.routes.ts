@@ -723,13 +723,15 @@ router.get(
         return res.status(404).json({ error: "User not found" });
       }
 
+      const walletAddress = user.walletAddress ?? "";
+
       // Get transactions grouped by token
       const transactionsByToken = await prisma.transaction.groupBy({
         by: ["tokenAddress"],
         where: {
           OR: [
-            { fromAddress: user.walletAddress },
-            { toAddress: user.walletAddress },
+            { fromAddress: walletAddress },
+            { toAddress: walletAddress },
           ],
         },
         _sum: {
@@ -747,7 +749,7 @@ router.get(
             prisma.transaction.aggregate({
               where: {
                 tokenAddress: tokenGroup.tokenAddress,
-                toAddress: user.walletAddress,
+                toAddress: walletAddress,
               },
               _sum: { amount: true },
               _count: true,
@@ -755,27 +757,30 @@ router.get(
             prisma.transaction.aggregate({
               where: {
                 tokenAddress: tokenGroup.tokenAddress,
-                fromAddress: user.walletAddress,
+                fromAddress: walletAddress,
               },
               _sum: { amount: true },
               _count: true,
             }),
           ]);
 
+          const countField = (tokenGroup._count as any).tokenAddress as number;
+          const incomingSum = incoming._sum?.amount ?? 0;
+          const outgoingSum = outgoing._sum?.amount ?? 0;
+
           return {
             tokenAddress: tokenGroup.tokenAddress,
-            totalTransactions: tokenGroup._count.tokenAddress,
-            totalVolume: tokenGroup._sum.amount || 0,
+            totalTransactions: countField,
+            totalVolume: tokenGroup._sum?.amount ?? 0,
             incoming: {
-              amount: incoming._sum.amount || 0,
+              amount: incomingSum,
               count: incoming._count,
             },
             outgoing: {
-              amount: outgoing._sum.amount || 0,
+              amount: outgoingSum,
               count: outgoing._count,
             },
-            netBalance:
-              (incoming._sum.amount || 0) - (outgoing._sum.amount || 0),
+            netBalance: incomingSum - outgoingSum,
           };
         }),
       );
@@ -907,10 +912,12 @@ router.get(
         return res.status(404).json({ error: "User not found" });
       }
 
+      const wallet = user.walletAddress ?? "";
+
       // Get total earned (money received)
       const earned = await prisma.transaction.aggregate({
         where: {
-          toAddress: user.walletAddress,
+          toAddress: wallet,
         },
         _sum: {
           amount: true,
@@ -920,7 +927,7 @@ router.get(
       // Get total spent (money sent)
       const spent = await prisma.transaction.aggregate({
         where: {
-          fromAddress: user.walletAddress,
+          fromAddress: wallet,
         },
         _sum: {
           amount: true,
@@ -932,8 +939,8 @@ router.get(
         by: ["type"],
         where: {
           OR: [
-            { fromAddress: user.walletAddress },
-            { toAddress: user.walletAddress },
+            { fromAddress: wallet },
+            { toAddress: wallet },
           ],
         },
         _count: {
@@ -945,8 +952,8 @@ router.get(
       const recentTransactions = await prisma.transaction.findMany({
         where: {
           OR: [
-            { fromAddress: user.walletAddress },
-            { toAddress: user.walletAddress },
+            { fromAddress: wallet },
+            { toAddress: wallet },
           ],
         },
         take: 5,
@@ -962,9 +969,9 @@ router.get(
       });
 
       res.json({
-        totalEarned: earned._sum.amount || 0,
-        totalSpent: spent._sum.amount || 0,
-        netBalance: (earned._sum.amount || 0) - (spent._sum.amount || 0),
+        totalEarned: earned._sum?.amount ?? 0,
+        totalSpent: spent._sum?.amount ?? 0,
+        netBalance: (earned._sum?.amount ?? 0) - (spent._sum?.amount ?? 0),
         transactionsByType: transactionsByType.reduce(
           (
             acc: Record<string, number>,

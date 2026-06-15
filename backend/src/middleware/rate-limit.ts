@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import rateLimit from "express-rate-limit";
+import rateLimit, { MemoryStore } from "express-rate-limit";
 import RedisStore from "rate-limit-redis";
 import { getRedisClient } from "../config/redis";
 
@@ -32,17 +32,25 @@ const sendTooManyWrites = (req: RateLimitedRequest, res: Response): void => {
 const redisClient = getRedisClient();
 const redisStore = redisClient
   ? new RedisStore({
-      client: redisClient,
+      sendCommand: (...args: string[]) =>
+        (redisClient as any).call(args[0], ...args.slice(1)),
       prefix: "rate_limit:",
     })
   : undefined;
+
+// When no Redis is configured, use explicit in-memory stores so they can be reset in tests
+const globalStore = redisStore ?? new MemoryStore();
+const loginStore = redisStore ? new RedisStore({ sendCommand: (...args: string[]) => (redisClient as any).call(args[0], ...args.slice(1)), prefix: "rate_limit_login:" }) : new MemoryStore();
+const registerStore = redisStore ? new RedisStore({ sendCommand: (...args: string[]) => (redisClient as any).call(args[0], ...args.slice(1)), prefix: "rate_limit_register:" }) : new MemoryStore();
+const forgotStore = redisStore ? new RedisStore({ sendCommand: (...args: string[]) => (redisClient as any).call(args[0], ...args.slice(1)), prefix: "rate_limit_forgot:" }) : new MemoryStore();
+const writeStore = redisStore ? new RedisStore({ sendCommand: (...args: string[]) => (redisClient as any).call(args[0], ...args.slice(1)), prefix: "rate_limit_write:" }) : new MemoryStore();
 
 export const globalRateLimiter = rateLimit({
   windowMs: RATE_LIMIT_WINDOW_MS,
   max: 100, // 100 req/min per IP
   standardHeaders: true,
   legacyHeaders: false,
-  store: redisStore,
+  store: globalStore,
   passOnStoreError: true,
   handler: sendTooManyRequests,
   skip: (req: Request) => {
@@ -56,7 +64,7 @@ export const loginRateLimiter = rateLimit({
   max: 10, // 10 req/min for auth endpoints
   standardHeaders: true,
   legacyHeaders: false,
-  store: redisStore,
+  store: loginStore,
   passOnStoreError: true,
   handler: sendTooManyRequests,
 });
@@ -66,7 +74,7 @@ export const registerRateLimiter = rateLimit({
   max: 10, // 10 req/min for auth endpoints
   standardHeaders: true,
   legacyHeaders: false,
-  store: redisStore,
+  store: registerStore,
   passOnStoreError: true,
   handler: sendTooManyRequests,
 });
@@ -76,7 +84,7 @@ export const forgotPasswordRateLimiter = rateLimit({
   max: 3,
   standardHeaders: true,
   legacyHeaders: false,
-  store: redisStore,
+  store: forgotStore,
   passOnStoreError: true,
   handler: sendTooManyRequests,
 });
@@ -86,7 +94,7 @@ export const writeRateLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  store: redisStore,
+  store: writeStore,
   passOnStoreError: true,
   keyGenerator: (req: Request) => {
     const rateLimitedReq = req as RateLimitedRequest;
@@ -95,3 +103,8 @@ export const writeRateLimiter = rateLimit({
   skip: (req: Request) => req.method !== "POST",
   handler: sendTooManyWrites,
 });
+
+export async function resetAllRateLimiters(): Promise<void> {
+  const stores = [globalStore, loginStore, registerStore, forgotStore, writeStore];
+  await Promise.all(stores.map((s) => (s as MemoryStore).resetAll?.()));
+}

@@ -84,7 +84,7 @@ router.get(
 router.get(
   "/:slug",
   asyncHandler(async (req: Request, res: Response) => {
-    const { slug } = req.params;
+    const slug = req.params.slug as string;
     const categoryName = slugToCategory(slug);
 
     if (!categoryName) {

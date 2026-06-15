@@ -11,6 +11,7 @@ import {
   Download,
   ExternalLink,
   Filter,
+  Loader2,
   RefreshCw,
   Wallet,
 } from "lucide-react";

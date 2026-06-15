@@ -1024,7 +1024,7 @@ impl ReputationContract {
             .ok_or(ReputationError::NotInitialized)?;
         dispute_contract.require_auth();
 
-        let score_change = match outcome {
+        let score_change: i64 = match outcome {
             DisputeOutcome::Won => 50,
             DisputeOutcome::Lost => -100,
             DisputeOutcome::MaliciousFiling => -250,
@@ -1040,6 +1040,7 @@ impl ReputationContract {
                 total_score: 0,
                 total_weight: 0,
                 review_count: 0,
+                last_updated_ledger: 0,
             });
 
         if score_change > 0 {

@@ -45,9 +45,10 @@ export async function generateStaticParams() {
 export async function generateMetadata({
   params,
 }: {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 }): Promise<Metadata> {
-  const validCategory = slugToCategory(params.slug);
+  const { slug } = await params;
+  const validCategory = slugToCategory(slug);
 
   if (!validCategory) {
     return {
@@ -75,16 +76,17 @@ export async function generateMetadata({
 
 export const revalidate = 600;
 
-export default function CategoryPage({
+export default async function CategoryPage({
   params,
 }: {
-  params: { slug: string };
+  params: Promise<{ slug: string }>;
 }) {
-  const validCategory = slugToCategory(params.slug);
+  const { slug } = await params;
+  const validCategory = slugToCategory(slug);
 
   if (!validCategory) {
     notFound();
   }
 
-  return <CategoryClient category={validCategory} slug={params.slug} />;
+  return <CategoryClient category={validCategory} slug={slug} />;
 }

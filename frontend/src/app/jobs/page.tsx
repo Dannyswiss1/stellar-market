@@ -51,6 +51,7 @@ function JobsContent() {
   const [newJobIds, setNewJobIds] = useState<Set<string>>(new Set());
   const [showBackToTop, setShowBackToTop] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const ready = useDelay(300);
 
   const { pendingJobs, clearPending } = useLiveJobFeed(liveFeedEnabled);
 
@@ -359,6 +360,7 @@ function JobsContent() {
             </div>
           )}
         </div>
+      </div>
       </div>
 
       {/* Screen reader announcement for new results */}

@@ -33,9 +33,13 @@ router.get(
       return res.status(403).json({ error: "Only freelancers can access earnings" });
     }
 
-    const { page = 1, limit = 10 } = req.query as { page: number; limit: number };
+    const { page = 1, limit = 10 } = req.query as unknown as { page: number; limit: number };
     const skip = (Number(page) - 1) * Number(limit);
     const wallet = user.walletAddress;
+
+    if (!wallet) {
+      return res.status(400).json({ error: "Freelancer has no wallet address." });
+    }
 
     // ── Summary stats ──
     const [totalEarnedAgg, earnedThisMonthAgg, pendingJobs, escrowJobs] = await Promise.all([
@@ -130,10 +134,10 @@ router.get(
 
     res.json({
       summary: {
-        totalEarned: totalEarnedAgg._sum.amount ?? 0,
-        earnedThisMonth: earnedThisMonthAgg._sum.amount ?? 0,
-        pendingRelease: pendingJobs._sum.budget ?? 0,
-        activeEscrow: escrowJobs._sum.budget ?? 0,
+        totalEarned: totalEarnedAgg._sum?.amount ?? 0,
+        earnedThisMonth: earnedThisMonthAgg._sum?.amount ?? 0,
+        pendingRelease: pendingJobs._sum?.budget ?? 0,
+        activeEscrow: escrowJobs._sum?.budget ?? 0,
       },
       monthlyEarnings: monthlyRaw,
       transactions,
@@ -196,7 +200,7 @@ router.get(
     const freelancersWithReputation = await Promise.all(
       topFreelancers.map(async (freelancer) => {
         const reputation = await ReputationService.getReputation(
-          freelancer.walletAddress
+          freelancer.walletAddress ?? ""
         );
         return {
           ...freelancer,
@@ -291,7 +295,7 @@ router.get(
       return res.status(304).end();
     }
 
-    const reputation = await ReputationService.getReputation(freelancer.walletAddress);
+    const reputation = await ReputationService.getReputation(freelancer.walletAddress ?? "");
 
     res.json({
       ...freelancer,

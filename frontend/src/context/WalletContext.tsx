@@ -86,7 +86,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [showWalletSelect, setShowWalletSelect] = useState(false);
   const [showDisconnectConfirm, setShowDisconnectConfirm] = useState(false);
   const pendingConnectResolve = useRef<((address: string | null) => void) | null>(null);
-  const pendingDisconnectResolve = useRef<((confirmed: boolean) => void) | null>(null);
+  const pendingDisconnectResolve = useRef<((value: string | null) => void) | null>(null);
   const switchingToProvider = useRef<WalletProviderType | null>(null);
 
   const balanceRefreshInterval = useRef<NodeJS.Timeout | null>(null);
@@ -492,7 +492,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       // Verify testnet connection
       try {
         const account = await horizonServer.loadAccount(lobstrAddress);
-        const networkMismatch = account._baseUrl?.includes("horizon.stellar.org");
+        const networkMismatch = (account as any)._baseUrl?.includes("horizon.stellar.org");
         if (networkMismatch) {
           setError("NETWORK_MISMATCH");
           return null;

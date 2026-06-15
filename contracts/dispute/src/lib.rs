@@ -41,6 +41,9 @@ pub enum DisputeError {
     AlreadyDelegated = 16,
     DelegateAlreadyVoted = 17,
     InvalidSplitBps = 18,
+    AppealWindowExpired = 19,
+    AlreadyAppealed = 20,
+    AppealNotFound = 21,
 }
 
 #[contracttype]
@@ -116,6 +119,8 @@ pub enum VoteChoice {
     RefundSplit(u32),
     /// Vote that the dispute initiator filed in bad faith.
     MaliciousFiling,
+    /// Vote to split the award proportionally; client_bps + freelancer_bps must equal 10_000.
+    SplitAward(u32, u32),
 }
 
 #[contracttype]
@@ -143,6 +148,8 @@ pub struct Dispute {
     pub refund_split_sum: u64,
     /// Votes that the filing was malicious (bad-faith). Requires 4/5 supermajority to trigger.
     pub votes_for_malicious: u32,
+    /// Votes for a proportional split award (SplitAward variant).
+    pub votes_for_split_award: u32,
     pub min_votes: u32,
     pub tie_break_method: TieBreakMethod,
     pub created_at: u64,
@@ -179,6 +186,16 @@ enum DataKey {
     CooldownDuration,
     /// Pool of eligible arbitrators that can be randomly selected for disputes
     ArbitratorPool,
+    /// Maps dispute_id → appeal_id (one appeal per dispute).
+    DisputeAppeal(u64),
+    /// Global monotonic appeal counter.
+    AppealCount,
+    /// Maps appeal_id → Appeal struct.
+    Appeal(u64),
+    /// Maps appeal_id → Vec<Vote>.
+    AppealVotes(u64),
+    /// Tracks whether a voter has already voted on a given appeal.
+    HasVotedAppeal(u64, Address),
 }
 
 fn require_not_paused(env: &Env) -> Result<(), DisputeError> {
@@ -217,6 +234,11 @@ const DEFAULT_PARTY_COOLDOWN_SECS: u64 = 1_209_600; // 14 days
 
 /// Maximum number of jobs to look back for conflict detection to avoid instruction limits.
 const MAX_CONFLICT_LOOKBACK: u64 = 100;
+
+/// How long (in seconds) after dispute resolution an appeal may be filed.
+const APPEAL_WINDOW_SECS: u64 = 172_800; // 48 hours
+/// Minimum votes required to resolve an appeal.
+const APPEAL_MIN_VOTES: u32 = 3;
 
 const MIN_TTL_THRESHOLD: u32 = 1_000;
 const MIN_TTL_EXTEND_TO: u32 = 10_000;
@@ -294,6 +316,38 @@ fn bump_delegation_owner_ttl(env: &Env, delegate: &Address, job_id: u64) {
 fn bump_last_dispute_ledger_ttl(env: &Env, client: &Address, freelancer: &Address) {
     env.storage().persistent().extend_ttl(
         &DataKey::LastDisputeLedger(client.clone(), freelancer.clone()),
+        MIN_TTL_THRESHOLD,
+        MIN_TTL_EXTEND_TO,
+    );
+}
+
+fn bump_appeal_ttl(env: &Env, appeal_id: u64) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::Appeal(appeal_id),
+        MIN_TTL_THRESHOLD,
+        MIN_TTL_EXTEND_TO,
+    );
+}
+
+fn bump_appeal_votes_ttl(env: &Env, appeal_id: u64) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::AppealVotes(appeal_id),
+        MIN_TTL_THRESHOLD,
+        MIN_TTL_EXTEND_TO,
+    );
+}
+
+fn bump_dispute_appeal_ttl(env: &Env, dispute_id: u64) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::DisputeAppeal(dispute_id),
+        MIN_TTL_THRESHOLD,
+        MIN_TTL_EXTEND_TO,
+    );
+}
+
+fn bump_has_voted_appeal_ttl(env: &Env, appeal_id: u64, voter: &Address) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::HasVotedAppeal(appeal_id, voter.clone()),
         MIN_TTL_THRESHOLD,
         MIN_TTL_EXTEND_TO,
     );
@@ -739,6 +793,7 @@ impl DisputeContract {
             votes_for_refund_split: 0,
             refund_split_sum: 0,
             votes_for_malicious: 0,
+            votes_for_split_award: 0,
             min_votes: if min_votes < 3 { 3 } else { min_votes },
             tie_break_method: tie_break_method.unwrap_or(TieBreakMethod::RefundBoth),
             created_at: env.ledger().timestamp(),
@@ -885,6 +940,12 @@ impl DisputeContract {
                     dispute.refund_split_sum.saturating_add(pct_client as u64);
             }
             VoteChoice::MaliciousFiling => dispute.votes_for_malicious += 1,
+            VoteChoice::SplitAward(client_bps, freelancer_bps) => {
+                if client_bps.saturating_add(freelancer_bps) != 10_000 {
+                    return Err(DisputeError::InvalidSplitBps);
+                }
+                dispute.votes_for_split_award += 1;
+            }
         }
 
         dispute.status = DisputeStatus::Voting;
@@ -916,10 +977,11 @@ impl DisputeContract {
             .get(&DataKey::EscrowContract);
 
         if let Some(escrow) = escrow_addr {
-            if dispute.votes_for_client >= 3 
-                || dispute.votes_for_freelancer >= 3 
-                || dispute.votes_for_refund_split >= 3 
-                || dispute.votes_for_malicious >= 3 
+            if dispute.votes_for_client >= 3
+                || dispute.votes_for_freelancer >= 3
+                || dispute.votes_for_refund_split >= 3
+                || dispute.votes_for_malicious >= 3
+                || dispute.votes_for_split_award >= 3
             {
                 // Auto-resolve the dispute
                 let _ = internal_resolve(&env, dispute_id, &mut dispute, &escrow, false);
@@ -1187,6 +1249,9 @@ impl DisputeContract {
                 }
                 ap.votes_for_refund_split += 1;
                 ap.refund_split_sum = ap.refund_split_sum.saturating_add(pct as u64);
+            }
+            VoteChoice::MaliciousFiling | VoteChoice::SplitAward(_, _) => {
+                return Err(DisputeError::Unauthorized);
             }
         }
 
@@ -1713,10 +1778,12 @@ fn internal_resolve(
         return Err(DisputeError::AlreadyResolved);
     }
 
+    let sa = dispute.votes_for_split_award;
     let total_votes = dispute.votes_for_client
         + dispute.votes_for_freelancer
         + dispute.votes_for_refund_split
-        + dispute.votes_for_malicious;
+        + dispute.votes_for_malicious
+        + sa;
     if !force && total_votes < dispute.min_votes {
         return Err(DisputeError::NotEnoughVotes);
     }

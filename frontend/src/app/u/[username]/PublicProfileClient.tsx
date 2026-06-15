@@ -102,7 +102,7 @@ export default function PublicProfileClient({ profile }: { profile: PublicProfil
             </span>
             <ShareMenu
               title={`${profile.username} on StellarMarket`}
-              url={`/profile/${profile.username}`}
+              url={`/u/${profile.username}`}
               description={`Check out ${profile.username}'s freelancer profile on StellarMarket`}
             />
           </div>

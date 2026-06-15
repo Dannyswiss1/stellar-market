@@ -1,8 +1,7 @@
+import { Suspense } from "react";
 import { Metadata } from "next";
 import { notFound } from "next/navigation";
 import ServicesCategoryClient from "./ServicesCategoryClient";
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000/api";
 
 const VALID_CATEGORIES = [
   "Frontend",
@@ -37,15 +36,12 @@ export async function generateStaticParams() {
 export async function generateMetadata({
   params,
 }: {
-  params: { category: string };
+  params: Promise<{ category: string }>;
 }): Promise<Metadata> {
-  const categoryName = params.category
-    .split("-")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
+  const { category } = await params;
 
   const validCategory = VALID_CATEGORIES.find(
-    (cat) => cat.toLowerCase().replace(/\s+/g, "-") === params.category,
+    (cat) => cat.toLowerCase().replace(/\s+/g, "-") === category,
   );
 
   if (!validCategory) {
@@ -72,23 +68,24 @@ export async function generateMetadata({
   };
 }
 
-export default function ServicesCategoryPage({
+export default async function ServicesCategoryPage({
   params,
 }: {
-  params: { category: string };
+  params: Promise<{ category: string }>;
 }) {
-  const categoryName = params.category
-    .split("-")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
+  const { category } = await params;
 
   const validCategory = VALID_CATEGORIES.find(
-    (cat) => cat.toLowerCase().replace(/\s+/g, "-") === params.category,
+    (cat) => cat.toLowerCase().replace(/\s+/g, "-") === category,
   );
 
   if (!validCategory) {
     notFound();
   }
 
-  return <ServicesCategoryClient category={validCategory} />;
+  return (
+    <Suspense>
+      <ServicesCategoryClient category={validCategory} />
+    </Suspense>
+  );
 }

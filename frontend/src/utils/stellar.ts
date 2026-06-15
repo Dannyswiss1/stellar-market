@@ -88,12 +88,12 @@ export async function prepareSorobanTransaction(
 
   const preparedTransaction = TransactionBuilder.cloneFrom(transaction, {
     fee: totalFee.toString(),
-  }).setSorobanData(simulation.transactionData);
+  }).setSorobanData(simulation.transactionData.build());
 
   return {
     preparedXdr: preparedTransaction.build().toXDR(),
     estimatedResourceFeeStroops: resourceFee,
     estimatedTotalFeeStroops: totalFee,
-    requiresRestoreFootprint: Boolean(simulation.restorePreamble),
+    requiresRestoreFootprint: rpc.Api.isSimulationRestore(simulation),
   };
 }
