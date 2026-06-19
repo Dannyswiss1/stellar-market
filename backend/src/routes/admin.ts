@@ -1136,7 +1136,7 @@ router.get(
   "/jobs/:id/event-log",
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const { id } = req.params;
+      const id = req.params.id as string;
       const job = await prisma.job.findUnique({ where: { id } });
       if (!job) {
         res.status(404).json({ error: "Job not found" });
@@ -1162,7 +1162,7 @@ router.post(
   "/jobs/:id/reproject",
   async (req: AuthRequest, res: Response): Promise<void> => {
     try {
-      const { id } = req.params;
+      const id = req.params.id as string;
       const job = await prisma.job.findUnique({ where: { id } });
       if (!job) {
         res.status(404).json({ error: "Job not found" });
